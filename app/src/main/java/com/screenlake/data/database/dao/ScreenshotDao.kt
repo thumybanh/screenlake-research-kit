@@ -135,6 +135,13 @@ interface ScreenshotDao {
     suspend fun getOcrCompleteOrRestrictedCount(): Int
 
     /**
+     * Count that matches the WHERE of getScreenshotsBatchByTime / ...ById pagination queries,
+     * so ZipFileWorker never sees a positive count with an empty pagination page.
+     */
+    @Query("SELECT COUNT(id) FROM screenshot_table WHERE ((isOcrComplete = 1 AND appSegmentId IS NOT NULL) OR (isAppRestricted = 1 AND appSegmentId IS NOT NULL))")
+    suspend fun getZippableCount(): Int
+
+    /**
      * Retrieves the total count of Screenshots.
      *
      * @return The total count of Screenshots.

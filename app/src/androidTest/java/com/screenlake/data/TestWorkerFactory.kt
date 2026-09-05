@@ -5,12 +5,15 @@ import androidx.work.ListenableWorker
 import androidx.work.WorkerFactory
 import androidx.work.WorkerParameters
 import com.screenlake.data.repository.GeneralOperationsRepository
+import com.screenlake.recorder.ocr.Recognize
 import com.screenlake.recorder.services.UploadWorker
 import com.screenlake.recorder.services.ZipFileWorker
+import io.mockk.mockk
 
 class TestWorkerFactory(
     private val generalOperationsRepository: GeneralOperationsRepository,
-    private val isNetworkConnected: Boolean = true
+    private val isNetworkConnected: Boolean = true,
+    private val recognize: Recognize = mockk(relaxed = true)
 ) : WorkerFactory() {
     override fun createWorker(
         appContext: Context,
@@ -19,7 +22,7 @@ class TestWorkerFactory(
     ): ListenableWorker? {
         return when (workerClassName) {
             ZipFileWorker::class.java.name ->
-                ZipFileWorker(appContext, workerParameters, generalOperationsRepository)
+                ZipFileWorker(appContext, workerParameters, generalOperationsRepository, recognize)
             UploadWorker::class.java.name ->
                 UploadWorker(
                     appContext,

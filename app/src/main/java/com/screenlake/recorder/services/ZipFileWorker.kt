@@ -9,6 +9,7 @@ import com.screenlake.data.database.entity.ScreenshotEntity
 import com.screenlake.data.database.entity.ScreenshotZipEntity
 import com.screenlake.data.database.entity.UserEntity
 import com.screenlake.data.repository.GeneralOperationsRepository
+import com.screenlake.recorder.ocr.Recognize
 import com.screenlake.recorder.screenshot.DataTransformation
 import com.screenlake.recorder.utilities.TimeUtility
 import com.screenlake.recorder.utilities.ZipFile
@@ -37,7 +38,8 @@ import java.util.*
 class ZipFileWorker @AssistedInject constructor(
     @Assisted context: Context,
     @Assisted workerParams: WorkerParameters,
-    private val generalOperationsRepository: GeneralOperationsRepository
+    private val generalOperationsRepository: GeneralOperationsRepository,
+    private val recognize: Recognize
 ) : CoroutineWorker(context, workerParams) {
 
     private var userObj: UserEntity? = null
@@ -106,11 +108,30 @@ class ZipFileWorker @AssistedInject constructor(
         testing: Boolean = false,
         file: File? = null
     ) {
-        val screenshotCount = withContext(Dispatchers.IO) { generalOperationsRepository.getScreenshotCount() }
-        Timber.tag(TAG).d("Found $screenshotCount to zip. Batch is set to ${ConstantSettings.getBatch()}")
-
         val path = (if (testing) file?.path else applicationContext.filesDir?.path) ?: ""
         writeLogsToCsv(path)
+
+        // Drive OCR + app-segment stamping from the worker so the zip pipeline
+        // no longer depends on ScreenshotService's screen-lock path. Without
+        // this, rows sit at isOcrComplete=0 / appSegmentId=NULL forever and
+        // getZippableScreenshotCount() stays at 0.
+        withContext(Dispatchers.IO) {
+            try {
+                recognize.runPendingOcr(applicationContext)
+            } catch (ex: Exception) {
+                Timber.tag(TAG).e(ex, "runPendingOcr failed")
+                generalOperationsRepository.saveLog("ZIP_WORKER_OCR_FAILED $runId", ex.stackTraceToString())
+            }
+            try {
+                generalOperationsRepository.saveAllSessionSegments()
+            } catch (ex: Exception) {
+                Timber.tag(TAG).e(ex, "saveAllSessionSegments failed")
+                generalOperationsRepository.saveLog("ZIP_WORKER_SEGMENTS_FAILED $runId", ex.stackTraceToString())
+            }
+        }
+
+        val screenshotCount = withContext(Dispatchers.IO) { generalOperationsRepository.getZippableScreenshotCount() }
+        Timber.tag(TAG).d("Found $screenshotCount to zip. Batch is set to ${ConstantSettings.getBatch()}")
 
         // Initial offset and count tracking
         var lastProcessedId: Int? = null
@@ -141,7 +162,7 @@ class ZipFileWorker @AssistedInject constructor(
                     processAppSegments(screenshots, path, zipFileId, toZip)
 
                     // Create zip file for this batch
-                    createZipFile(toZip, path, zipFileId, screenshots.size, screenshots.mapNotNull { it.id })
+                    createZipFile(toZip, path, zipFileId, screenshots)
 
                     // Update lastProcessedId for next batch instead of using offset
                     lastProcessedId = screenshots.lastOrNull()?.id
@@ -320,7 +341,8 @@ class ZipFileWorker @AssistedInject constructor(
      * @param zipFileId The unique identifier for the zip file.
      * @param screenshotCount The number of screenshots included in the zip.
      */
-    private fun createZipFile(toZip: MutableList<File>, path: String, zipFileId: UUID, screenshotCount: Int, screenshots: List<Int>) {
+    private fun createZipFile(toZip: MutableList<File>, path: String, zipFileId: UUID, screenshots: List<ScreenshotEntity>) {
+        val screenshotCount = screenshots.size
         val zipFile = File(path, "image_zip_${zipFileId}_${screenshotCount}.zip")
         ZipFile().zip(zipFile, toZip)
 
@@ -335,7 +357,7 @@ class ZipFileWorker @AssistedInject constructor(
         }
 
         generalOperationsRepository.insertScreenshotZip(zipObj)
-//
+
         toZip.forEach { it.withLogging("Zip Worker", "Delete") { file -> file.delete() } }
         Timber.tag(TAG).d("Zip file created with ${toZip.size} files.")
     }

@@ -364,6 +364,10 @@ class GeneralOperationsRepository @Inject constructor(
         return screenshotDao.getOcrCompleteOrRestrictedCount()
     }
 
+    suspend fun getZippableScreenshotCount(): Int {
+        return screenshotDao.getZippableCount()
+    }
+
     suspend fun getScreenshotsToOcr(limit: Int): List<ScreenshotEntity> {
         return screenshotDao.getAllScreenshotsSortedByDateWhereOcrIsNotComplete(
             limit = limit,

@@ -48,7 +48,10 @@ class RecognizeInstrumentedTest {
         DataHelper.copyAssetToInternalStorage(appContext, "img.png")
 
         // Initialize the Recognize class
-        recognize = Recognize(DatabaseModule.provideDatabase(appContext).getUserDao())
+        recognize = Recognize(
+            DatabaseModule.provideDatabase(appContext).getUserDao(),
+            io.mockk.mockk(relaxed = true)
+        )
     }
 
     /**

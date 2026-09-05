@@ -1,5 +1,6 @@
 package com.screenlake.recorder.ocr
 
+import android.content.Context
 import android.graphics.BitmapFactory
 import android.os.SystemClock
 import androidx.lifecycle.MutableLiveData
@@ -13,6 +14,8 @@ import com.screenlake.recorder.utilities.record
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
 import java.io.File
@@ -33,6 +36,8 @@ class Recognize @Inject constructor(
     var isInitialized = true
         private set
     var stopped = false
+
+    private val batchMutex = Mutex()
 
     init {
         this.tessApi = TessBaseAPI { progressValues ->
@@ -202,6 +207,49 @@ class Recognize @Inject constructor(
         tessApi.recycle()
         stopped = true
         isInitialized = false
+    }
+
+    /**
+     * Batch-OCRs every screenshot currently missing OCR text, then marks each
+     * row `isOcrComplete = 1` in the DB — success or failure. Callable from any
+     * worker without depending on ScreenshotService lifecycle or screen-lock.
+     *
+     * Failed rows are still marked complete (with empty text) so the zip
+     * pipeline is never permanently blocked by one bad screenshot.
+     */
+    suspend fun runPendingOcr(context: Context, fetchLimit: Int = 1000) {
+        batchMutex.withLock {
+            val pending = generalOperationsRepository.getScreenshotsToOcr(fetchLimit)
+            if (pending.isEmpty()) {
+                Timber.tag(TAG).d("runPendingOcr: nothing pending.")
+                return@withLock
+            }
+            Timber.tag(TAG).d("runPendingOcr: ${pending.size} pending screenshots.")
+
+            try {
+                initTesseract(
+                    Assets.getTessDataPath(context),
+                    Assets.language,
+                    TessBaseAPI.OEM_LSTM_ONLY
+                )
+                if (!isInitialized) {
+                    generalOperationsRepository.saveLog(
+                        "OCR_BATCH_INIT_FAILED",
+                        "Tesseract failed to init for batch run of ${pending.size} rows."
+                    )
+                    return@withLock
+                }
+
+                for (shot in pending) {
+                    processImage(shot)
+                    val id = shot.id ?: continue
+                    generalOperationsRepository.setScreenToOcrComplete(shot)
+                    Timber.tag(TAG).v("runPendingOcr: marked id=$id ocr-complete.")
+                }
+            } finally {
+                stop()
+            }
+        }
     }
 
     companion object {
