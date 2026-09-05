@@ -74,7 +74,7 @@ class ZipFileWorker @AssistedInject constructor(
             } else {
                 isRunning = true
                 Timber.tag(TAG).d("Zip Worker has started.")
-                zipUpScreenshots(50)
+                zipUpScreenshots(200)
                 Timber.tag(TAG).d("Zip Worker has finished.")
                 generalOperationsRepository.saveLog("ZIP_WORKER_RUN_${System.currentTimeMillis()}", runId)
                 WorkerProgressManager.updateProgress("Finished zipping up screenshots.")

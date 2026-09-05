@@ -21,11 +21,19 @@
         "StringLike": {
           "s3:prefix": [
             "academia/*",
-            "unpacked/*",
+            "data/*",
             "_manifests/*"
           ]
         }
       }
+    },
+    {
+      "Sid": "ReadOwnManifestsForUpsert",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject"
+      ],
+      "Resource": "arn:aws:s3:::my-tcu-bucket/_manifests/*"
     },
     {
       "Sid": "WriteDerivedTrees",
@@ -34,7 +42,7 @@
         "s3:PutObject"
       ],
       "Resource": [
-        "arn:aws:s3:::my-tcu-bucket/unpacked/*",
+        "arn:aws:s3:::my-tcu-bucket/data/*",
         "arn:aws:s3:::my-tcu-bucket/_manifests/*"
       ]
     },

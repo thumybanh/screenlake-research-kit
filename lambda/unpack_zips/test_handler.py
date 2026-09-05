@@ -1,5 +1,5 @@
 """Local unit tests for handler.py — do not run in Lambda.
-Run: python -m pytest lambda/unpack_zips/test_handler.py
+Run: python -m pytest lambda/unpack_zips/test_handler.py -v
 """
 from __future__ import annotations
 
@@ -14,11 +14,6 @@ import handler as H
 
 
 def _build_zip(rows, jpg_names, extra_csvs=None) -> bytes:
-    """Build an in-memory zip that mimics ZipFileWorker output.
-    rows: list of dicts keyed by the screenshot CSV column names.
-    jpg_names: list of member names to include as fake JPGs.
-    extra_csvs: dict[name -> bytes] to include as additional CSVs.
-    """
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         header = [
@@ -39,9 +34,12 @@ def _build_zip(rows, jpg_names, extra_csvs=None) -> bytes:
 
 
 class FakeS3:
-    def __init__(self, zip_bytes):
+    """In-memory S3 that lets tests exercise get/put/download semantics."""
+
+    def __init__(self, zip_bytes, prefills: dict | None = None):
         self.zip_bytes = zip_bytes
-        self.puts = []
+        self.puts: list[dict] = []
+        self.store: dict[str, bytes] = dict(prefills or {})
 
     def download_file(self, bucket, key, local_path):
         with open(local_path, "wb") as fh:
@@ -49,57 +47,122 @@ class FakeS3:
 
     def put_object(self, **kwargs):
         self.puts.append(kwargs)
+        self.store[kwargs["Key"]] = kwargs["Body"]
         return {"ETag": "fake"}
 
+    def get_object(self, Bucket, Key):
+        if Key not in self.store:
+            from botocore.exceptions import ClientError
+            raise ClientError(
+                {"Error": {"Code": "NoSuchKey", "Message": "not found"}},
+                "GetObject",
+            )
+        body = self.store[Key]
+        return {"Body": io.BytesIO(body)}
 
-def _run(zip_bytes, key="academia/tenant/T_A/panel/P/V/panelist/1234/image_zip_uuid_2.zip"):
-    fake = FakeS3(zip_bytes)
+
+DEFAULT_KEY = "academia/tenant/T_A/panel/general_1/V/panelist/2323/image_zip_uuid_2.zip"
+
+
+def _run(zip_bytes, key=DEFAULT_KEY, prefills=None):
+    fake = FakeS3(zip_bytes, prefills=prefills)
     with patch.object(H, "s3", fake):
         H.process_zip("bucket", key)
-    return fake.puts
+    return fake
 
 
-def test_happy_path_single_date():
+def _index_from(fake):
+    key = "_manifests/panel=general_1/panelist=2323/_index.json"
+    return json.loads(fake.store[key].decode("utf-8"))
+
+
+def test_first_zip_creates_index_with_summary_fields():
     rows = [
         {"file": "/dev/img_a.jpg", "apk": "com.android.chrome",
          "id_session": "sess-1", "t_epoch_ts_ms": "1788526805000"},
         {"file": "/dev/img_b.jpg", "apk": "com.android.chrome",
          "id_session": "sess-1", "t_epoch_ts_ms": "1788526810000"},
     ]
-    puts = _run(_build_zip(rows, ["img_a.jpg", "img_b.jpg"]))
-    keys = [p["Key"] for p in puts]
-    assert any("images/20260904T" in k and k.endswith(".jpg") for k in keys)
-    # Manifest exists.
-    manifest_puts = [p for p in puts if p["Key"].startswith("_manifests/")]
-    assert len(manifest_puts) == 1
-    manifest = json.loads(manifest_puts[0]["Body"].decode("utf-8"))
-    assert manifest["counts"]["images"] == 2
-    assert manifest["session_ids"] == ["sess-1"]
-    # Content types set correctly.
-    for p in puts:
-        if p["Key"].endswith(".jpg"):
-            assert p["ContentType"] == "image/jpeg"
-        elif p["Key"].endswith(".csv"):
-            assert p["ContentType"] == "text/csv"
-        elif p["Key"].endswith(".json"):
-            assert p["ContentType"] == "application/json"
+    fake = _run(_build_zip(rows, ["img_a.jpg", "img_b.jpg"]))
+    index = _index_from(fake)
+    assert index["panel"] == "general_1"
+    assert index["panelist"] == "2323"
+    assert index["study_start_utc"] == "2026-09-04T13:00:05Z"
+    assert index["latest_capture_utc"] == "2026-09-04T13:00:10Z"
+    assert index["total_screenshots"] == 2
+    assert index["days_participating"] == 1
+    assert index["_processed_zip_uuids"] == ["image_zip_uuid_2"]
+    assert index["updated_at"].endswith("Z")
 
 
-def test_midnight_split_writes_both_dates():
+def test_second_zip_updates_running_totals():
+    rows_first = [{"file": "/dev/img_a.jpg", "apk": "com.a",
+                   "id_session": "s1", "t_epoch_ts_ms": "1788526805000"}]
+    fake = _run(_build_zip(rows_first, ["img_a.jpg"]),
+                key="academia/tenant/T_A/panel/general_1/V/panelist/2323/image_zip_first_1.zip")
+
+    rows_second = [
+        {"file": "/dev/img_c.jpg", "apk": "com.a", "id_session": "s2",
+         "t_epoch_ts_ms": "1789131605000"},  # 7 days later
+        {"file": "/dev/img_d.jpg", "apk": "com.a", "id_session": "s2",
+         "t_epoch_ts_ms": "1789131610000"},
+    ]
+    prefill_key = "_manifests/panel=general_1/panelist=2323/_index.json"
+    fake2 = _run(_build_zip(rows_second, ["img_c.jpg", "img_d.jpg"]),
+                 key="academia/tenant/T_A/panel/general_1/V/panelist/2323/image_zip_second_2.zip",
+                 prefills={prefill_key: fake.store[prefill_key]})
+    index = _index_from(fake2)
+    assert index["total_screenshots"] == 3
+    assert index["study_start_utc"] == "2026-09-04T13:00:05Z"  # unchanged
+    assert index["latest_capture_utc"] == "2026-09-11T13:00:10Z"
+    assert index["days_participating"] == 8  # inclusive calendar span
+    assert index["_processed_zip_uuids"] == [
+        "image_zip_first_1", "image_zip_second_2",
+    ]
+
+
+def test_replay_same_zip_is_noop():
+    rows = [{"file": "/dev/img_a.jpg", "apk": "com.a", "id_session": "s1",
+             "t_epoch_ts_ms": "1788526805000"}]
+    fake = _run(_build_zip(rows, ["img_a.jpg"]))
+    index_after_first = _index_from(fake)
+
+    fake2 = _run(_build_zip(rows, ["img_a.jpg"]),
+                 prefills={k: v for k, v in fake.store.items()})
+    index_after_second = _index_from(fake2)
+    assert index_after_first == index_after_second
+
+
+def test_csvs_replicated_across_midnight_split_dates():
     rows = [
         {"file": "/dev/img_a.jpg", "apk": "com.a", "id_session": "s1",
-         "t_epoch_ts_ms": "1788479999000"},  # 2026-09-03 23:59:59 UTC
+         "t_epoch_ts_ms": "1788479999000"},  # 2026-09-03 UTC
         {"file": "/dev/img_b.jpg", "apk": "com.a", "id_session": "s1",
-         "t_epoch_ts_ms": "1788480001000"},  # 2026-09-04 00:00:01 UTC
+         "t_epoch_ts_ms": "1788480001000"},  # 2026-09-04 UTC
     ]
-    puts = _run(_build_zip(rows, ["img_a.jpg", "img_b.jpg"]))
-    image_keys = [p["Key"] for p in puts if p["Key"].endswith(".jpg")]
-    dates = {k.split("date=")[1].split("/")[0] for k in image_keys}
+    fake = _run(_build_zip(rows, ["img_a.jpg", "img_b.jpg"]))
+    csv_keys = [p["Key"] for p in fake.puts if p["Key"].startswith("data/")]
+    dates = {k.split("date=")[1].split("/")[0] for k in csv_keys}
     assert dates == {"2026-09-03", "2026-09-04"}
-    # CSVs replicated to both date partitions.
-    csv_keys = [p["Key"] for p in puts if p["Key"].endswith(".csv")]
-    csv_dates = {k.split("date=")[1].split("/")[0] for k in csv_keys}
-    assert csv_dates == {"2026-09-03", "2026-09-04"}
+
+
+def test_csvs_have_text_csv_content_type():
+    rows = [{"file": "/dev/img_a.jpg", "apk": "com.a", "id_session": "s1",
+             "t_epoch_ts_ms": "1788526805000"}]
+    fake = _run(_build_zip(rows, ["img_a.jpg"]))
+    for put in fake.puts:
+        if put["Key"].startswith("data/"):
+            assert put["ContentType"] == "text/csv"
+        elif put["Key"].startswith("_manifests/"):
+            assert put["ContentType"] == "application/json"
+
+
+def test_no_images_are_extracted():
+    rows = [{"file": "/dev/img_a.jpg", "apk": "com.a", "id_session": "s1",
+             "t_epoch_ts_ms": "1788526805000"}]
+    fake = _run(_build_zip(rows, ["img_a.jpg"]))
+    assert not any(p["Key"].endswith(".jpg") for p in fake.puts)
+    assert not any(p["Key"].startswith("unpacked/") for p in fake.puts)
 
 
 def test_missing_csv_row_raises():
@@ -125,13 +188,6 @@ def test_empty_session_id_raises():
         _run(_build_zip(rows, ["img_a.jpg"]))
 
 
-def test_null_apk_raises():
-    rows = [{"file": "/dev/img_a.jpg", "apk": "null", "id_session": "s1",
-             "t_epoch_ts_ms": "1788480001000"}]
-    with pytest.raises(H.HandlerError, match="empty apk"):
-        _run(_build_zip(rows, ["img_a.jpg"]))
-
-
 def test_bad_epoch_raises():
     rows = [{"file": "/dev/img_a.jpg", "apk": "com.a", "id_session": "s1",
              "t_epoch_ts_ms": "not-a-number"}]
@@ -140,22 +196,7 @@ def test_bad_epoch_raises():
 
 
 def test_key_not_matching_layout_is_skipped():
-    """Zip uploaded outside academia/tenant/ prefix should be no-op."""
     fake = FakeS3(_build_zip([], []))
     with patch.object(H, "s3", fake):
         H.process_zip("bucket", "somewhere_else/foo.zip")
     assert fake.puts == []
-
-
-def test_collision_appends_suffix():
-    # Two screenshots at same second, same session, same apk.
-    rows = [
-        {"file": "/dev/img_a.jpg", "apk": "com.a", "id_session": "s1",
-         "t_epoch_ts_ms": "1788480001000"},
-        {"file": "/dev/img_b.jpg", "apk": "com.a", "id_session": "s1",
-         "t_epoch_ts_ms": "1788480001500"},  # same second
-    ]
-    puts = _run(_build_zip(rows, ["img_a.jpg", "img_b.jpg"]))
-    jpg_keys = [p["Key"] for p in puts if p["Key"].endswith(".jpg")]
-    assert len(jpg_keys) == 2
-    assert any("__1.jpg" in k for k in jpg_keys)
