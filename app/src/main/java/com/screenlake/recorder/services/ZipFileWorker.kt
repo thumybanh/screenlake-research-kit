@@ -147,7 +147,7 @@ class ZipFileWorker @AssistedInject constructor(
 
                 val screenshots = generalOperationsRepository.getPaginateScreenshotsById(0L, lastProcessedId, limit)
 
-                generalOperationsRepository.saveLog("<< $runId >>Zip file id: $zipFileId, files [${screenshots.map { id }.joinToString(separator = ", ")}]", "")
+                generalOperationsRepository.saveLog("<< $runId >>Zip file id: $zipFileId, files [${screenshots.map { it.id }.joinToString(separator = ", ")}]", "")
 
                 if (screenshots.isNotEmpty()) {
                     val log1 = "<< $runId >>Zip file id: $zipFileId, Processing batch of ${screenshots.size} screenshots (lastId: ${lastProcessedId ?: "null"})"
