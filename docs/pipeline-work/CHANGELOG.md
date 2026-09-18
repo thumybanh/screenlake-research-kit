@@ -33,7 +33,9 @@ Running log of every change made to the fork beyond upstream Screenlake, in reve
 - Researcher pre-assigns via Cognito Console: eliminates uniqueness bug but requires manual per-participant work.
 - Client-side S3 existence check: race conditions, false positives on reinstall, still requires IAM changes.
 
-**Next decision:** which of the three integration options to pursue. Recommended for pilot: option 3 (researcher CLI), zero risk to working app.
+**Decided:** option 3 (researcher CLI). Zero Android changes. Researcher runs `lambda/assign_tcu_code/assign-code.sh <cognito_sub>` per participant, tells them their code, they type it in the existing invite screen. Preserves working onboarding flow; still gets uniqueness guarantee from the Lambda's DynamoDB counter.
+
+Follow-up commit added the `assign-code.sh` helper + updated README.
 
 ---
 

@@ -55,9 +55,31 @@ aws dynamodb put-item --table-name screenlake-tcu-codes \
 
 Currently reserved: `1234`, `2323` (existing test panelists).
 
-## Manual invocation (researcher tool)
+## Researcher workflow (chosen integration path — no Android changes)
 
-Give a code to a specific Cognito user without touching the mobile app:
+For each new participant:
+
+```bash
+./lambda/assign_tcu_code/assign-code.sh <cognito_sub> [email]
+```
+
+Example output:
+```
+  TCU code: TCU-1005
+  (bare code to type into app invite screen: 1005)
+  Status: newly assigned
+```
+
+Tell the participant their TCU code. They type the bare 4-digit number (1005) into the existing invite screen when they open the app.
+
+Where to find `<cognito_sub>`:
+- AWS Console → Cognito → User Pools → your pool → Users
+- Click the participant's user
+- Copy the `sub` attribute (UUID like `12345678-abcd-ef01-2345-678901234567`)
+
+Reruns for the same `<cognito_sub>` are idempotent — returns the code they already have. Safe to re-run if you lose track of what code was assigned.
+
+## Raw API (if not using the helper script)
 
 ```bash
 aws lambda invoke --function-name screenlake-assign-tcu \
@@ -67,8 +89,6 @@ aws lambda invoke --function-name screenlake-assign-tcu \
   /tmp/out.json
 cat /tmp/out.json
 ```
-
-`<sub>` is the Cognito user's UUID (visible in Cognito Console → Users → the user's `sub` attribute).
 
 ## Reset counter (destructive — do not run once real participants exist)
 
@@ -92,18 +112,8 @@ python3 -m venv /tmp/venv && /tmp/venv/bin/pip install pytest boto3
 
 **Deployed:** Lambda + DynamoDB + IAM role → live in us-east-2.
 
-**Not yet integrated with Android app.** The mobile client cannot yet call this Lambda. Options for how to wire it in:
+**Chosen integration path:** researcher CLI-only (path 3 above). Zero Android changes. Researcher runs `./assign-code.sh <cognito_sub>` per participant, tells them their code, they type it in the existing invite screen. Lowest risk. Fits a 60-participant pilot cleanly.
 
-1. **Direct Lambda invoke from Android via AWS SDK.** Requires:
-   - Grant Cognito Identity Pool's authenticated role `lambda:InvokeFunction` on this Lambda ARN.
-   - Add `aws-android-sdk-lambda` dependency (~10 MB).
-   - ~30 lines of Kotlin in `RegisterLoadingFragment` to invoke after Cognito signup.
-
-2. **API Gateway HTTPS endpoint in front of Lambda.** Requires:
-   - Create HTTP API in API Gateway.
-   - Attach Cognito authorizer (participant's ID token proves identity).
-   - ~15 lines of Kotlin using Amplify's `Amplify.API.post()` (already in codebase).
-
-3. **Researcher CLI-only workflow.** No Android changes. Researcher runs the `aws lambda invoke` command above per new participant, tells them the code, they type it in the existing invite screen.
-
-Path 2 is the cleanest for the app; path 3 is the cheapest for launch. Decision pending.
+If the study scales past a few hundred participants and manual CLI runs become a bottleneck, upgrade to one of the other paths:
+1. Direct Lambda invoke from Android via AWS SDK (needs Cognito auth role change + ~30 lines Kotlin + `aws-android-sdk-lambda` dependency).
+2. API Gateway HTTPS endpoint in front of Lambda (~15 lines Kotlin using existing `Amplify.API.post()`).
