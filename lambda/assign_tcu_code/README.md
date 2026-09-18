@@ -55,12 +55,12 @@ aws dynamodb put-item --table-name screenlake-tcu-codes \
 
 Currently reserved: `1234`, `2323` (existing test panelists).
 
-## Researcher workflow (chosen integration path — no Android changes)
+## Researcher workflow
 
-For each new participant:
+For each new participant, after they've registered a Cognito account via the app:
 
 ```bash
-./lambda/assign_tcu_code/assign-code.sh <cognito_sub> [email]
+./lambda/assign_tcu_code/assign-code.sh <cognito_sub> <email>
 ```
 
 Example output:
@@ -70,14 +70,16 @@ Example output:
   Status: newly assigned
 ```
 
-Tell the participant their TCU code. They type the bare 4-digit number (1005) into the existing invite screen when they open the app.
+The Lambda writes the code into the Cognito user's `custom:tcu_code` attribute automatically. The next time the participant opens the app and taps "Start recording," the app fetches the attribute from Cognito and uses it silently. **No participant typing required.** If the fetch fails (offline, no attribute), the app falls back to the manual invite dialog.
 
 Where to find `<cognito_sub>`:
 - AWS Console → Cognito → User Pools → your pool → Users
 - Click the participant's user
 - Copy the `sub` attribute (UUID like `12345678-abcd-ef01-2345-678901234567`)
 
-Reruns for the same `<cognito_sub>` are idempotent — returns the code they already have. Safe to re-run if you lose track of what code was assigned.
+The `<email>` is used as the Cognito Username (required to update the user's custom attribute).
+
+Reruns for the same `<cognito_sub>` are idempotent — returns the code they already have and re-syncs the Cognito attribute if it was somehow cleared. Safe to re-run.
 
 ## Raw API (if not using the helper script)
 
@@ -112,8 +114,12 @@ python3 -m venv /tmp/venv && /tmp/venv/bin/pip install pytest boto3
 
 **Deployed:** Lambda + DynamoDB + IAM role → live in us-east-2.
 
-**Chosen integration path:** researcher CLI-only (path 3 above). Zero Android changes. Researcher runs `./assign-code.sh <cognito_sub>` per participant, tells them their code, they type it in the existing invite screen. Lowest risk. Fits a 60-participant pilot cleanly.
+**Integration path:** Cognito custom attribute. Researcher runs `assign-code.sh`, Lambda writes `custom:tcu_code` to the Cognito user, mobile app fetches it via Amplify Auth on first "Start recording" tap. Manual invite dialog stays as fallback.
 
-If the study scales past a few hundred participants and manual CLI runs become a bottleneck, upgrade to one of the other paths:
-1. Direct Lambda invoke from Android via AWS SDK (needs Cognito auth role change + ~30 lines Kotlin + `aws-android-sdk-lambda` dependency).
-2. API Gateway HTTPS endpoint in front of Lambda (~15 lines Kotlin using existing `Amplify.API.post()`).
+**Why this shape and not direct Lambda invoke from mobile:**
+- No new AWS SDK dependency on the app (Amplify already has fetchUserAttributes).
+- No IAM change to Cognito Identity Pool (would have needed lambda:InvokeFunction grant).
+- Cognito already the identity system of record — attribute persists across reinstalls automatically.
+- Researcher CLI is the single point of code assignment. Mobile is read-only.
+
+**Cognito schema:** `custom:tcu_code` attribute on user pool `us-east-2_J52HUsGbQ`. String, 4 characters, mutable.

@@ -32,9 +32,11 @@ import boto3
 from botocore.exceptions import ClientError
 
 TABLE_NAME = os.environ.get("TCU_TABLE_NAME", "screenlake-tcu-codes")
+COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(TABLE_NAME)
+cognito_idp = boto3.client("cognito-idp")
 
 
 class HandlerError(RuntimeError):
@@ -47,9 +49,13 @@ def lambda_handler(event, _context):
 
     existing = _lookup_existing(cognito_sub)
     if existing is not None:
+        # Best-effort re-sync of the Cognito attribute in case it was cleared or
+        # never written on a prior run. Idempotent from the app's perspective.
+        _write_cognito_attribute(cognito_username, existing)
         return _ok(existing, cognito_sub, assigned_now=False)
 
     tcu_code = _assign_new(cognito_sub, cognito_username)
+    _write_cognito_attribute(cognito_username, tcu_code)
     return _ok(tcu_code, cognito_sub, assigned_now=True)
 
 
@@ -152,3 +158,27 @@ def _ok(tcu_code: str, cognito_sub: str, assigned_now: bool) -> dict:
         "assigned_now": assigned_now,
         "cognito_sub": cognito_sub,
     }
+
+
+def _write_cognito_attribute(cognito_username: str, tcu_code: str) -> None:
+    """Write the assigned code to the Cognito user's custom:tcu_code attribute.
+    Best-effort: failures here are logged but do not fail the Lambda, because
+    the DynamoDB record is the source of truth for uniqueness. Mobile app
+    reads this attribute on launch to skip the invite-code screen.
+    """
+    if not COGNITO_USER_POOL_ID or not cognito_username:
+        return
+    try:
+        cognito_idp.admin_update_user_attributes(
+            UserPoolId=COGNITO_USER_POOL_ID,
+            Username=cognito_username,
+            UserAttributes=[
+                {"Name": "custom:tcu_code", "Value": tcu_code},
+            ],
+        )
+    except ClientError as e:
+        # Log and swallow — do not fail the assignment. Attribute can be
+        # re-synced by re-invoking the Lambda for the same user later.
+        code = e.response.get("Error", {}).get("Code", "Unknown")
+        msg = e.response.get("Error", {}).get("Message", str(e))
+        print(f"warning: could not write custom:tcu_code for {cognito_username}: {code} {msg}")

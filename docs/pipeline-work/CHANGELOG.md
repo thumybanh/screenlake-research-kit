@@ -4,6 +4,36 @@ Running log of every change made to the fork beyond upstream Screenlake, in reve
 
 ---
 
+## Latest — Auto-fetch TCU code via Cognito custom attribute
+
+**Scope:** Cognito schema + Lambda write + Android read. Replaces the earlier "researcher tells participant the code, participant types it" workflow with a fully automatic one, while keeping the manual invite dialog as fallback.
+
+**Problem this fixed:** the manual invite screen accepted any 4-digit code. Participant could type the wrong number (typo, misheard, forgot which was theirs) and the app would happily route their data to a different `panelist=<code>/` prefix. Uniqueness enforcement lived only on the researcher side.
+
+**How it works now:**
+1. Participant registers a Cognito account via the app (email + password).
+2. Researcher looks up their `sub` in Cognito Console.
+3. Researcher runs `assign-code.sh <sub> <email>`. Lambda assigns a code AND writes it to the participant's `custom:tcu_code` attribute on Cognito.
+4. Participant taps "Start recording" in the app. Before showing the invite dialog, `ScreenRecordFragment.tryFetchTcuCodeFromCognito()` calls `Amplify.Auth.fetchUserAttributes()` and looks for `custom:tcu_code`. If found and valid (4 digits), sets it silently and continues. If not found or fetch fails, falls back to the manual dialog.
+
+**Deployed changes:**
+- Cognito user pool `us-east-2_J52HUsGbQ`: added `custom:tcu_code` attribute (String, mutable, 4 chars).
+- Lambda `screenlake-assign-tcu`:
+  - New helper `_write_cognito_attribute` — calls `cognito-idp:AdminUpdateUserAttributes` after both first-time assignment AND idempotent reruns (re-syncs the attribute in case it was cleared).
+  - New env var `COGNITO_USER_POOL_ID=us-east-2_J52HUsGbQ`.
+  - Failures on the Cognito write are logged but do not fail the Lambda — DynamoDB is source of truth.
+- Lambda IAM role: added `cognito-idp:AdminUpdateUserAttributes` on the user pool.
+- Android `ScreenRecordFragment`:
+  - `toggleRecording` first attempts auto-fetch via `tryFetchTcuCodeFromCognito()`.
+  - On success: sets `user.emailHash`, toasts "Participant ID: TCU-1005", proceeds to start recording.
+  - On fail (offline, missing attribute, invalid code): falls back to `showMissingIdDialog()`.
+  - Manual dialog now shows "Enter the 4-digit code your researcher assigned. Your ID will look like TCU-XXXX." and strips optional `TCU-` prefix from typed input.
+  - Success toast changed from "Invite code: XXXX" to "Participant ID: TCU-XXXX" for consistency.
+
+**Not touched:** the Lambda invocation still happens researcher-side via `assign-code.sh`. The mobile client only READS the attribute, never invokes the Lambda directly. No AWS SDK dependency added to the APK.
+
+---
+
 ## d214f1e — Add assign_tcu_code Lambda + DynamoDB (backend only)
 
 **Commit:** `d214f1e`

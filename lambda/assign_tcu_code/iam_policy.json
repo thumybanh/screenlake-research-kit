@@ -12,6 +12,14 @@
       "Resource": "arn:aws:dynamodb:us-east-2:842294335158:table/screenlake-tcu-codes"
     },
     {
+      "Sid": "WriteTcuCodeToCognito",
+      "Effect": "Allow",
+      "Action": [
+        "cognito-idp:AdminUpdateUserAttributes"
+      ],
+      "Resource": "arn:aws:cognito-idp:us-east-2:842294335158:userpool/us-east-2_J52HUsGbQ"
+    },
+    {
       "Sid": "CloudWatchLogs",
       "Effect": "Allow",
       "Action": [

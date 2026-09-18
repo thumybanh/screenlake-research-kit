@@ -656,12 +656,46 @@ class ScreenRecordFragment : Fragment(R.layout.fragment_screen_record), EasyPerm
         lifecycleScope.launch {
             val user = userDao.getUser()
             if(user.emailHash.isNullOrEmpty()) {
-                showMissingIdDialog()
+                // Try to auto-fetch the TCU code from Cognito before falling
+                // back to manual invite dialog. If the researcher already ran
+                // assign-code.sh for this participant, the Lambda wrote it to
+                // the custom:tcu_code attribute — we can pick it up silently.
+                val fetched = tryFetchTcuCodeFromCognito()
+                if (fetched != null) {
+                    user.emailHash = fetched
+                    userDao.insertUserObj(user)
+                    ScreenshotService.user = user
+                    Toast.makeText(
+                        this@ScreenRecordFragment.context,
+                        "Participant ID: TCU-$fetched",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    requestPermissions()
+                    requestPackageUsageStatsPermissions()
+                    startRecording()
+                } else {
+                    showMissingIdDialog()
+                }
             }else{
                 requestPermissions()
                 requestPackageUsageStatsPermissions()
                 startRecording()
             }
+        }
+    }
+
+    /** Best-effort fetch of `custom:tcu_code` from the current Cognito user's
+     *  attributes. Returns null on any failure (offline, no such attribute,
+     *  session expired) so the caller falls back to the manual invite dialog.
+     */
+    private suspend fun tryFetchTcuCodeFromCognito(): String? {
+        return try {
+            val attrs = com.amplifyframework.kotlin.core.Amplify.Auth.fetchUserAttributes()
+            val value = attrs.firstOrNull { it.key.keyString == "custom:tcu_code" }?.value
+            if (!value.isNullOrBlank() && validateCode(value)) value else null
+        } catch (t: Throwable) {
+            Timber.tag("ScreenRecordFragment").w(t, "fetchUserAttributes failed; falling back to invite dialog")
+            null
         }
     }
 
@@ -803,10 +837,10 @@ class ScreenRecordFragment : Fragment(R.layout.fragment_screen_record), EasyPerm
 
         // Build the dialog
         val builder = AlertDialog.Builder(context)
-            .setTitle("Missing ID")
-            .setMessage("Please enter your 4 digit panel invite code before continuing.")
+            .setTitle("Participant ID")
+            .setMessage("Enter the 4-digit code your researcher assigned. Your ID will look like TCU-XXXX.")
             .setPositiveButton("Continue") { dialog, _ ->
-                val inviteCode = codeEditText.text.toString()
+                val inviteCode = codeEditText.text.toString().trim().removePrefix("TCU-").removePrefix("tcu-")
                 if (inviteCode.isNotEmpty()) {
 
                     if (!validateCode(inviteCode)) {
@@ -821,7 +855,7 @@ class ScreenRecordFragment : Fragment(R.layout.fragment_screen_record), EasyPerm
                             ScreenshotService.user = user
                         }
 
-                        Toast.makeText(context, "Invite code: $inviteCode", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "Participant ID: TCU-$inviteCode", Toast.LENGTH_SHORT).show()
                         dialog.dismiss()
                     }
                 } else {
