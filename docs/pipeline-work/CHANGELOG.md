@@ -4,22 +4,51 @@ Running log of every change made to the fork beyond upstream Screenlake, in reve
 
 ---
 
-## In progress — TCU code auto-assignment (Lambda + Cognito)
+## d214f1e — Add assign_tcu_code Lambda + DynamoDB (backend only)
 
-**Problem being solved:** the current invite code screen accepts any 4-digit number a participant types. Two participants can type the same code → data collides under the same `panelist=<code>/` prefix. At 60 participants, random 4-digit assignment has a 16% collision rate. Manual code assignment is possible but risks researcher error.
+**Commit:** `d214f1e`
+**Scope:** new Lambda + DynamoDB table + IAM. No Android changes.
 
-**Design chosen:** Option 1 — Lambda-assigned sequential codes backed by DynamoDB atomic counter. Guaranteed unique. No manual assignment. Preserves 4-digit readability. Reinstall-safe via Cognito attribute lookup.
+**Problem solved:** current invite code screen accepts any 4-digit number a participant types. Two participants can type the same code → data collides under the same `panelist=<code>/` prefix. At 60 participants, random 4-digit assignment has a 16% collision rate.
+
+**Design chosen:** Lambda-assigned sequential codes backed by DynamoDB atomic counter. Guaranteed unique. Reinstall-safe (same Cognito user always gets the same code back).
+
+**What's deployed:**
+- DynamoDB table `screenlake-tcu-codes` (PAY_PER_REQUEST, us-east-2)
+- Counter initialized to 1000; first real code = 1001
+- Reserved codes 1234, 2323 pre-seeded to protect existing test data
+- Lambda `screenlake-assign-tcu` (Python 3.12, 256 MB)
+- IAM role `screenlake-assign-tcu-role` with DynamoDB + Logs access
+
+**Smoke-tested:** first invocation returned 1001, second returned 1002, replay of first returned 1001 (idempotent). Test data cleaned up before real rollout.
+
+**Not integrated with Android yet.** The mobile client still uses the manual invite code screen. Three wiring options are documented in `lambda/assign_tcu_code/README.md`:
+
+1. Direct Lambda invoke from mobile via AWS SDK (Cognito Identity Pool auth role needs `lambda:InvokeFunction` grant; ~30 lines of Kotlin; +10 MB APK for the Lambda SDK)
+2. API Gateway HTTPS in front of Lambda + Amplify.API.post from mobile (new API Gateway resource; ~15 lines of Kotlin)
+3. Researcher CLI-only workflow — zero mobile changes; researcher runs `aws lambda invoke` per participant, tells them their assigned code, participant types it in the existing invite screen
 
 **Rejected alternatives:**
 - Random 4-digit: 16% collision at 60 users, unsafe.
 - Researcher pre-assigns via Cognito Console: eliminates uniqueness bug but requires manual per-participant work.
 - Client-side S3 existence check: race conditions, false positives on reinstall, still requires IAM changes.
 
-**Deliverables in flight:**
-- `lambda/assign_tcu_code/` — Lambda handler, IAM policy, DynamoDB setup, tests, README.
-- Android changes: remove invite code dialog, call Lambda after Cognito signup, save code to Cognito custom attribute, display as `TCU-<code>` in-app.
-- Cognito schema: add `custom:tcu_code` attribute.
-- DynamoDB pre-populated with reserved codes 1234 and 2323 (existing test data).
+**Next decision:** which of the three integration options to pursue. Recommended for pilot: option 3 (researcher CLI), zero risk to working app.
+
+---
+
+## 4f8f829 — Add pipeline-work docs (changelog, architecture, decisions)
+
+**Commit:** `4f8f829`
+**Scope:** docs only.
+
+Created `docs/pipeline-work/` with three files:
+- `README.md` — index and update conventions.
+- `CHANGELOG.md` — this file.
+- `ARCHITECTURE.md` — current-state snapshot of S3 layout, Android pipeline, Lambda behavior, IAM setup.
+- `DECISIONS.md` — 10 architecture-decision records for the non-obvious calls (raw immutability, zip-on-upload, 200-batch, per-zip CSVs, in-place `_index.json`, on-device OCR, TCU assignment approach, debug APK distribution, TCU- UI prefix, Cognito ownership).
+
+Purpose: future contributors (or future-me) can catch up on what changed, what the current state is, and why non-obvious calls were made.
 
 ---
 
