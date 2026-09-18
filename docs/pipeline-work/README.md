@@ -10,6 +10,8 @@ Living documentation of every change made to this fork beyond upstream Screenlak
 
 **[DECISIONS.md](DECISIONS.md)** — architecture-decision records. Why zips instead of individual images, why 200 per batch, why in-place `_index.json` updates, etc. Read this before proposing a change to challenge or extend a previous call.
 
+**[NEXT_STEPS.md](NEXT_STEPS.md)** — deferred work: things designed but not yet built (e.g. Cognito post-confirmation trigger to auto-assign TCU codes on signup) plus parked ideas. Pick tasks from here when you have time.
+
 ## How to update these docs
 
 When you (or a future contributor) makes a meaningful change:
